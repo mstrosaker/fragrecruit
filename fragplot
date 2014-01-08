@@ -1,0 +1,380 @@
+#!/usr/bin/env python
+"""
+Script to generate fragment recruiting plots.
+
+Run "fragplot -h" to get a summary of the options.
+"""
+
+from __future__ import division
+import matplotlib
+matplotlib.use('agg')    # let matplotlib know this system is headless
+import pylab, imp, sys, os, shutil, getopt, math, errno
+from SequenceFile import SequenceFile
+from SAMFile import SAMFile
+from FRHITFile import FRHITFile
+
+class Progress:
+    """
+    Simple progress indicator; indicates that long tasks are still running.
+    """
+
+    def __init__(self):
+        self.msg = None
+
+    def progress(self, msg):
+        if self.msg is not None:
+            self.erase()
+        self.msg = msg
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+        sys.stdout.write('\b' * len(self.msg))
+
+    def erase(self):
+        sys.stdout.write(' ' * len(self.msg))
+        sys.stdout.write('\b' * len(self.msg))
+
+
+class FragmentPlotter:
+    """
+    Generates fragment recruiting plots.
+
+    Due to the nature of the pylab module, only one instance of this class
+    should be instantiated; its new_plot() method should be invoked when
+    a plot is completed in order to move to a new one.  I had considered
+    making this a singleton, but it doesn't quite fit that design pattern.
+
+    Note that this can only handle 15 samples at this point.  It's trivial to
+    extend it to handle more than 15 samples; simply add new colors to the
+    'colors' list.  The gen_legend() method may need to be updated as well.
+    """
+    colors = [
+        (0.17, 0.50, 0.69, 1.0),   #medium teal/blue
+        (0.60, 0.82, 0.47, 1.0),   #medium/light green
+        (0.95, 0.94, 0.60, 1.0),   #light gold
+        (0.95, 0.40, 0.40, 1.0),   #dark pink/fuschia
+        (0.65, 0.81, 0.89, 1.0),   #light teal
+        (0.85, 0.64, 0.60, 1.0),   #light plum
+        (0.99, 0.60, 0.17, 1.0),   #light orange
+        (0.42, 0.62, 0.29, 1.0),   #dark green
+        (0.49, 0.33, 0.65, 1.0),   #medium blue
+        (0.94, 0.44, 0.27, 1.0),   #dark orange/red
+        (0.78, 0.59, 0.17, 1.0),   #dark gold
+        (0.80, 0.80, 0.80, 1.0),   #gray
+        (0.80, 1.00, 0.00, 1.0),   #bright yellow/green
+        (1.00, 0.00, 0.80, 1.0),   #bright pink
+        (1.00, 0.00, 0.00, 1.0)    #red
+    ]
+
+    def __init__(self, microbiome, progress=None, ymin=50):
+        self.microbiome = microbiome
+        self.decorated = False
+        self.ymin = ymin
+        self.p = progress
+
+    def new_plot(self, refgenome, taxid, contigs, begin, length):
+        """Clear data from any previous plots and start a new one."""
+        pylab.close()
+        self.refgenome = refgenome
+        self.taxid = taxid
+        self.contigs = contigs
+        self.begin = begin
+        self.samples = []
+        self.n_points = 0
+        self.points_x = []
+        self.points_y = []
+        self.points_c = []
+        self.decorated = False
+
+        self.full_length = 0
+        for contig in self.contigs:
+            self.full_length += contig[1]
+            if self.p is not None:
+                print '  Contig: %s (%d bp)' % (contig[0], contig[1])
+        if length != 0:
+            self.xextent = begin+length
+        else:
+            self.xextent = self.full_length
+
+    def decorate(self):
+        """Add axes, shade contigs, etc."""
+        if not self.decorated:
+            self.decorated = True
+
+            if self.p is not None:
+                print '      Alignments: %d' % self.n_points
+
+            matplotlib.rc('xtick', labelsize=8)
+
+            ticks = [self.begin]
+            labels = [int(self.begin)]
+
+            # Highlight alternate contigs with shaded boxes, and label the
+            # larger ones.  This will give an idea of the density of points
+            # among the contigs.
+            i = 0
+            start = 0
+            for c in contigs:
+                i += 1
+                end = start + c[1]
+
+                if start >= self.begin or end <= self.xextent:
+                    if start >= self.begin:
+                        fill_a = start
+                    else:
+                        fill_a = self.begin
+
+                    if end <= self.xextent:
+                        fill_b = end
+                    else:
+                        fill_b = self.xextent
+
+                    if c[1] > (self.xextent - self.begin) / 4:
+                        # only include a label if the contig is long enough
+                        ticks.append(fill_a + (fill_b - fill_a)/2)
+                        labels.append(c[0])
+
+                    if i % 2 == 0:
+                        pylab.fill([fill_a, fill_b, fill_b, fill_a],
+                                   [50, 50, 100, 100], 'b', alpha=0.1)
+
+                start = end
+
+            ticks.append(self.xextent)
+            labels.append(str(self.xextent))
+            pylab.xticks(ticks, labels)
+
+            ax = pylab.gca()
+            for tick in ax.xaxis.get_major_ticks():
+                tick.label1.set_fontsize(8)
+
+            # Add horizontal lines at multiples of 10
+            horiz = range(int(math.ceil(self.ymin/10)) * 10, 100, 10)
+            pylab.hlines(horiz, 0, self.xextent,
+                         colors='#c0c0c0', linewidth=0.5)
+            pylab.xlim(self.begin, self.xextent)
+            pylab.ylim(self.ymin, 100)
+            pylab.ylabel('Identity (%)')
+
+            # Add titles
+            pylab.title(self.refgenome)
+            pylab.suptitle(self.microbiome)
+
+    def draw(self, filename):
+        """Plot the points that have been added with add_point()."""
+        if self.n_points > 10000:
+            pt_shape = 'o'
+            pt_size = 1
+        else:
+            pt_shape = 's'
+            pt_size = 3
+
+        if self.p is not None:
+            p.progress('      Plotting points...')
+        if self.n_points > 0:
+            pylab.scatter(self.points_x, self.points_y, s=pt_size,
+                          c=self.points_c, marker=pt_shape, edgecolors='none',
+                          alpha=0.1)
+            if self.p is not None:
+                p.progress('      Decorating plot...')
+        self.decorate()
+        if self.p is not None:
+            p.progress('      Saving image...')
+        pylab.savefig(filename, dpi=300, bbox_inches=0)
+
+    def gen_legend(self, filename, width=4):
+        """Create a separate image for the legend of sample colors."""
+        pylab.figure(figsize=(width, 0.45*len(self.samples)))
+        pylab.axis('off')
+        pylab.ylim(-1, 0)
+
+        i = 0
+        ystep = 1/len(self.samples)
+        for s in self.samples:
+            pylab.text(0.00, -1*i*ystep-0.1, 'text',
+                       backgroundcolor=self.colors[i], color=self.colors[i])
+            pylab.text(0.27, -1*i*ystep-0.1, s)
+            i += 1
+
+        pylab.title("Samples")
+        pylab.savefig(filename, bbox_inches=0)
+
+    def show(self):
+        self.decorate()
+        pylab.show()
+
+    def add_sample(self, name):
+        if verbose:
+            print '    Sample: %s' % name
+        self.samples.append(name)
+
+    def add_point(self, sample, contig, offset, identity):
+        """Add a new point to the array, prior to calling draw()."""
+        x = 0
+        for c in self.contigs:
+            if (contig == c[0]):
+                break
+            x += c[1]
+        clr = 0
+        for s in self.samples:
+            if (sample == s):
+                break
+            clr += 1
+
+        if x+offset >= self.begin and x+offset <= self.xextent:
+            self.n_points += 1
+            self.points_x.append(x+offset)
+            self.points_y.append(identity)
+            self.points_c.append(self.colors[clr])
+
+
+def usage():
+    print 'Usage:'
+    print '  %s [options] <config_file>' % sys.argv[0]
+    print '\n  Options'
+    print '    -v: verbose'
+    print '    -h: display this help message'
+    print '    -o <filename>: string to prepend the output file name'
+    print '    -m <n>: only plot sequence alignments of length n or greater'
+    print '    -i <n>: minimum identity to include in plot (y-axis extent)'
+    print '    -g <taxonids>: only generate plots for the specified genomes'
+    print '       multiple genomes can be specified in a comma-separated list'
+    print '    -s <samples>: only plot points for the specified samples'
+    print '       multiple samples can be specified in a comma-separated list'
+    print '    -b <n>: begin the plot at the nth nucleotide in the ref genome'
+    print '    -l <n>: include n nucleotides in the x-axis of the plot'
+    print '       the default behavior is to plot the entirety of the genome'
+
+if __name__ == '__main__':
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], 'ho:vm:i:g:s:b:l:',
+                ['help', 'output=', 'min_align=', 'identity=', 'genomes=',
+                'samples=', 'begin=', 'length='])
+    except getopt.GetoptError, err:
+        print str(err)
+        usage()
+        sys.exit(2)
+
+    output = ''
+    verbose = False
+    min_align = 0
+    identity = 50.0
+    genomes_spec = None
+    samples_spec = None
+    begin = 0
+    length = 0
+    p = None
+
+    # Parse and validate command-line arguments
+    for o, a in opts:
+        if o == '-v':
+            verbose = True
+        elif o in ('-h', '--help'):
+            usage()
+            sys.exit(0)
+        elif o in ('-o', '--output'):
+            output = a
+        elif o in ('-m', '--min-align'):
+            min_align = int(a)
+        elif o in ('-i', '--identity'):
+            identity = float(a)
+        elif o in ('-g', '--genomes'):
+            genomes_spec = a.split(',')
+        elif o in ('-s', '--samples'):
+            samples_spec = a.split(',')
+        elif o in ('-b', '--begin'):
+            begin = int(a)
+        elif o in ('-l', '--length'):
+            length = int(a)
+        else:
+            assert False, "unhandled option"
+
+    if len(args) == 0:
+        print 'Specify a configuration file as an argument'
+        usage()
+        sys.exit(1)
+
+    # Read in the specified configuration file
+    config = imp.load_source('*', args[0])
+
+    if verbose:
+        p = Progress()
+    plotter = FragmentPlotter(config.microbiome, progress=p, ymin=identity)
+
+    try:
+        os.mkdir(config.shortname)
+    except OSError, err:
+        if err.errno == errno.EEXIST:
+            print 'The output directory, %s, already exists.' % config.shortname
+            sys.exit(1)
+
+    for refgenome in config.refgenomes:
+
+        if genomes_spec is not None:
+            if refgenome[1] not in genomes_spec:
+                continue
+
+        print "Processing reference genome: %s" % refgenome[0]
+
+        # Parse the FASTA file for the genome, specify the contigs
+        # Note that the sequences in the FASTA file might actually be
+        # scaffolds, scaftigs, or a full genome; we refer to them as
+        # contigs here for simplicity.
+        contigs = []
+        fasta = open("%s%s" % (config.basepath, refgenome[2]), 'rb')
+
+        for seq in SequenceFile(fasta):
+            contigs.append([seq.name.split('|')[3], len(seq.seq)])
+
+        fasta.close()
+
+        plotter.new_plot(refgenome[0], refgenome[1], contigs, begin, length)
+
+        for sample in config.samples:
+
+            if samples_spec is not None:
+                found = False
+                for s in samples_spec:
+                    if sample[0].startswith(s):
+                        found = True
+                if not found:
+                    continue
+
+            plotter.add_sample(sample[0])
+
+            # Parse the input file for this sample, plot points
+            file = "%s%s" % (config.basepath, sample[1][refgenome[1]])
+            count = 0
+            if verbose:
+                p.progress('      0 points processed')
+
+            if file.endswith('.sam'):
+                frag_func = SAMFile
+            elif file.endswith('.fr-hit'):
+                frag_func = FRHITFile
+            else:
+                print '  ERROR: %s is an unrecognized file type' % file
+
+            for frag in frag_func(file):
+                if frag.length >= min_align and frag.identity >= identity:
+                    count += 1
+                    if verbose and count % 100 == 0:
+                        p.progress('      %d points processed' % count)
+                    plotter.add_point(sample[0], frag.refseq,
+                                      frag.location, frag.identity)
+
+            if verbose:
+                p.erase()
+
+        plotter.draw('%s/%s.png' % (config.shortname, refgenome[1]))
+
+    # Generate a legend image for the sample colors
+    plotter.gen_legend("%s/legend.png" % (config.shortname))
+
+    # Make a tarball of the resulting PNGs
+    os.system('tar -cvf %s%s.tar %s >/dev/null' %
+              (output, config.shortname, config.shortname))
+    os.system('gzip %s%s.tar' % (output, config.shortname))
+    shutil.rmtree(config.shortname)
+
+    print 'Output filename: %s%s.tar.gz' % (output, config.shortname)
+
