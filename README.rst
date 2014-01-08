@@ -27,7 +27,7 @@ How to use it?
 
 Run "./fragplot -h" for a usage message:
 
-Usage:
+Usage::
   ./fragplot [options] <config_file>
 
   Options
