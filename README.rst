@@ -7,6 +7,10 @@ fragment recruitment tools such as FR-HIT or any tool that provides output
 in the SAM format (such as Bowtie or BWA) and generates plots that describe
 how sequencing reads align to reference genomes.
 
+This was written as an assignment for a metagenomics course at the
+Johns Hopkins University, and so has not undergone much in the way of
+testing or refinement.
+
 Prerequisites
 -------------
 
@@ -25,9 +29,9 @@ should be formatted.
 How to use it?
 --------------
 
-Run "./fragplot -h" for a usage message:
+Run "./fragplot -h" for a usage message::
 
-Usage::
+ Usage:
   ./fragplot [options] <config_file>
 
   Options
